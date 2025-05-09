@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>Dashboard</title>
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<link rel="stylesheet" href="/css/bootstrap.min.css">
+	</head>
+
+	<body>
+		<div class="container">
+			<div class="row">
+				<div class="col-xs-12">
+					<h1>cert-manager Org Govulncheck Status</h1>
+				</div>
+			</div>
+
+			<div class="row">
+				<div class="col-xs-6">
+					<p>Last updated: {{ .LastUpdated }}</p>
+				</div>
+				<div class="col-xs-6">
+					<p>All times UTC</p>
+				</div>
+			</div>
+
+			<div class="row">
+				<div class="col-xs-12">
+					<table class="table table-striped">
+						<tr>
+							<th>Repo</th>
+							<th>Tag</th>
+							<th>Date</th>
+							<th>Status</th>
+							<th>Last Run</th>
+							<th>Head</th>
+							<th>Warnings</th>
+						</tr>
+
+						<tr>
+							<th></th>
+							<th colspan="2">Last Release</th>
+							<th colspan="3">Govulncheck Status</th>
+							<th></th>
+						</tr>
+
+						{{ range $repo := .Repos }}
+						<tr class="{{ $repo.BootstrapClass }}">
+							<td>
+								<a href="https://github.com/{{- $repo.OrgName -}}/{{- $repo.RepoName -}}" target="_blank">
+								{{ $repo.OrgName }}/{{ $repo.RepoName }}
+								</a>
+							</td>
+							<td>{{ $repo.LastRelease.GetTagName }}</td>
+							<td>{{ $repo.LastReleaseTime }}</td>
+							<td>{{ $repo.LastRun.GetConclusion }}</td>
+							<td>{{ $repo.LastGovulncheckTime }}</td>
+							<td>{{ $repo.LastRun.GetHeadBranch }}</td>
+							<td>{{ $repo.WarningMessage }}</td>
+						</tr>
+						{{ end }}
+					</table>
+				</div>
+			</div>
+		</div>
+	</body>
+</html>
