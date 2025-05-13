@@ -3,15 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
-	"embed"
 	_ "embed"
 	"fmt"
 	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,7 +27,17 @@ const (
 
 	twoDays    = 2 * 30
 	thirtyDays = 24 * 30
+
+	ntfyTopic = "cert-manager-warnings"
 )
+
+type repoConfigurer func(*targetRepo)
+
+func WithHasReleases(hasReleases bool) repoConfigurer {
+	return func(t *targetRepo) {
+		t.HasReleases = hasReleases
+	}
+}
 
 var (
 	// targetList is the list of repos we want to check
@@ -40,6 +51,7 @@ var (
 		TargetRepo("cert-manager", "cmctl"),
 		TargetRepo("cert-manager", "google-cas-issuer"),
 		TargetRepo("cert-manager", "openshift-routes"),
+		TargetRepo("cert-manager", "issuer-lib", WithHasReleases(false)),
 	}
 
 	//go:embed templates/index.html
@@ -51,11 +63,8 @@ var (
 	//go:embed static/favicon.ico
 	faviconData []byte
 
-	//go:embed static/css/bootstrap.min.css
-	bootstrapCSSData []byte
-
-	//go:embed static
-	staticFS embed.FS
+	//go:embed static/css/bootstrap-v3.4.1.min.css
+	bootstrapV341CSSData []byte
 )
 
 type targetRepo struct {
@@ -82,6 +91,14 @@ func (tr *targetRepo) WarningMessage() string {
 	return wrn
 }
 
+func (tr *targetRepo) LastTag() string {
+	if !tr.HasReleases || tr.LastRelease == nil {
+		return "N/A"
+	}
+
+	return tr.LastRelease.GetTagName()
+}
+
 func (tr *targetRepo) LastReleaseTime() string {
 	if !tr.HasReleases || tr.LastRelease == nil {
 		return "N/A"
@@ -105,11 +122,11 @@ func (tr *targetRepo) LastGovulncheckTime() string {
 func (tr *targetRepo) warnings() (string, string) {
 	if tr.HasGovulncheck {
 		if tr.LastRun == nil {
-			return "danger", "no data for last run"
+			return "danger", "no data for last govulncheck run"
 		} else if tr.LastRun.GetConclusion() != "success" {
-			return "warning", "last run not successful"
+			return "danger", "last govulncheck run not successful"
 		} else if time.Since(tr.LastRun.GetCreatedAt().Time).Hours() > twoDays {
-			return "warning", "govulncheck stale for more than two days"
+			return "danger", "govulncheck stale for more than two days"
 		}
 	}
 
@@ -118,7 +135,9 @@ func (tr *targetRepo) warnings() (string, string) {
 			return "danger", "no data for last release"
 		}
 
-		if time.Since(tr.LastRelease.GetCreatedAt().Time).Hours() > thirtyDays {
+		if time.Since(tr.LastRelease.GetCreatedAt().Time).Hours() > 2*thirtyDays {
+			return "danger", "last release more than sixty days old"
+		} else if time.Since(tr.LastRelease.GetCreatedAt().Time).Hours() > thirtyDays {
 			return "warning", "last release more than thirty days old"
 		}
 	}
@@ -126,8 +145,8 @@ func (tr *targetRepo) warnings() (string, string) {
 	return "", ""
 }
 
-func TargetRepo(org string, name string) *targetRepo {
-	return &targetRepo{
+func TargetRepo(org string, name string, configurers ...repoConfigurer) *targetRepo {
+	t := &targetRepo{
 		OrgName:  org,
 		RepoName: name,
 
@@ -136,6 +155,12 @@ func TargetRepo(org string, name string) *targetRepo {
 
 		GovulncheckWorkflowName: "govulncheck.yaml",
 	}
+
+	for _, c := range configurers {
+		c(t)
+	}
+
+	return t
 }
 
 type DashboardHandler struct {
@@ -163,7 +188,7 @@ func NewDashboardHandler() (*DashboardHandler, error) {
 	}, nil
 }
 
-func (dh *DashboardHandler) Update() error {
+func (dh *DashboardHandler) Update(ctx context.Context) error {
 	dh.indexDataLock.Lock()
 	defer dh.indexDataLock.Unlock()
 
@@ -183,6 +208,23 @@ func (dh *DashboardHandler) Update() error {
 	}
 
 	dh.indexData = buf.Bytes()
+
+	var warnings []string
+
+	for _, repo := range targetList {
+		_, warningMessage := repo.warnings()
+
+		if warningMessage != "" {
+			warnings = append(warnings, fmt.Sprintf("%s: %s", repo.RepoName, warningMessage))
+		}
+	}
+
+	if len(warnings) > 0 {
+		err = ntfy(ntfyTopic, strings.Join(warnings, ", "))
+		if err != nil {
+			logging.FromContext(ctx).Error("got an error trying to publish to ntfy.sh", "err", err)
+		}
+	}
 
 	return nil
 }
@@ -284,7 +326,7 @@ func updateRepos(ctx context.Context, logger *slog.Logger, client *github.Client
 	return wg.Wait()
 }
 
-func maintainRepos(ctx context.Context, client *github.Client, dh *DashboardHandler) error {
+func maintainRepos(ctx context.Context, client *github.Client, dh *DashboardHandler) {
 	logger := logging.FromContext(ctx).With("source", "repoMaintainer")
 
 	ticker := time.NewTicker(maintainencePeriod)
@@ -294,7 +336,7 @@ func maintainRepos(ctx context.Context, client *github.Client, dh *DashboardHand
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 
 		case <-ticker.C:
 			logger.Info("updating repos", "nextRun", time.Now().Add(maintainencePeriod))
@@ -304,29 +346,56 @@ func maintainRepos(ctx context.Context, client *github.Client, dh *DashboardHand
 				continue
 			}
 
-			err = dh.Update()
+			err = dh.Update(ctx)
 			if err != nil {
 				logger.Error("failed to update dashboard handler; data may be stale", "err", err)
 				continue
 			}
+
 		}
 	}
 }
 
 func staticResourceHandler(w http.ResponseWriter, r *http.Request) {
+	// This is very basic, and something like http.FileServerFS might work here, but we probably
+	// won't need a tonne of static resources for this simple dashboard and there's little point
+	// complicating things.
 	switch r.URL.Path {
 	case "/robots.txt":
-		http.ServeFileFS(w, r, staticFS, "static/robots.txt")
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write(robotsTXTData)
+		return
 
 	case "/favicon.ico":
-		http.ServeFileFS(w, r, staticFS, "static/favicon.ico")
+		w.Header().Set("Content-Type", "image/x-icon")
+		_, _ = w.Write(faviconData)
+		return
 
-	case "/css/bootstrap.min.css":
-		http.ServeFileFS(w, r, staticFS, "static/css/bootstrap.min.css")
+	case "/css/bootstrap-v3.4.1.min.css":
+		w.Header().Set("content-Type", "text/css")
+		_, _ = w.Write(bootstrapV341CSSData)
+		return
 
 	default:
 		http.NotFoundHandler().ServeHTTP(w, r)
 	}
+}
+
+// This function taken from a MIT-licensed project from github.com/SgtCoDFish
+func ntfy(topic string, warnings string) error {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	ntfyMessage := fmt.Sprintf("got warnings on at least one project: %s", warnings)
+
+	path, err := url.JoinPath("https://ntfy.sh/", topic)
+	if err != nil {
+		return err
+	}
+
+	_, err = client.Post(path, "text/plain", strings.NewReader(ntfyMessage))
+	return err
 }
 
 func run(ctx context.Context) error {
@@ -352,7 +421,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("failed to complete initial sync for repo data: %s", err)
 	}
 
-	err = dashboardHandler.Update()
+	err = dashboardHandler.Update(ctx)
 	if err != nil {
 		return err
 	}
@@ -365,7 +434,7 @@ func run(ctx context.Context) error {
 
 	mux.HandleFunc("GET /favicon.ico", staticResourceHandler)
 	mux.HandleFunc("GET /robots.txt", staticResourceHandler)
-	mux.HandleFunc("GET /css/bootstrap.min.css", staticResourceHandler)
+	mux.HandleFunc("GET /css/bootstrap-v3.4.1.min.css", staticResourceHandler)
 
 	addr := ":49984"
 	server := &http.Server{
