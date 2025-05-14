@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -65,6 +66,8 @@ var (
 
 	//go:embed static/css/bootstrap-v3.4.1.min.css
 	bootstrapV341CSSData []byte
+
+	lastNtfy string
 )
 
 type targetRepo struct {
@@ -220,9 +223,19 @@ func (dh *DashboardHandler) Update(ctx context.Context) error {
 	}
 
 	if len(warnings) > 0 {
-		err = ntfy(ntfyTopic, strings.Join(warnings, ", "))
-		if err != nil {
-			logging.FromContext(ctx).Error("got an error trying to publish to ntfy.sh", "err", err)
+		logger := logging.FromContext(ctx)
+
+		message := strings.Join(warnings, ", ")
+
+		if message != lastNtfy {
+			err = ntfy(ntfyTopic, message)
+			if err != nil {
+				logger.Error("got an error trying to publish to ntfy.sh", "err", err)
+			}
+
+			lastNtfy = message
+		} else {
+			logger.Info("skipping publishing to ntfy.sh as message is unchanged")
 		}
 	}
 
@@ -404,12 +417,30 @@ func run(ctx context.Context) error {
 
 	logger := logging.FromContext(ctx)
 
-	token := os.Getenv("GITHUB_TOKEN")
-	if token == "" {
-		return fmt.Errorf("no GITHUB_TOKEN found in env")
+	config := struct {
+		GitHubToken string `json:"githubToken"`
+	}{}
+
+	configData, err := os.ReadFile("/etc/cert-manager-dashboard/config.json")
+	if err != nil {
+		token := os.Getenv("GITHUB_TOKEN")
+		if token == "" {
+			return fmt.Errorf("no config.json available and no GITHUB_TOKEN found in env")
+		}
+
+		config.GitHubToken = token
+	} else {
+		err = json.Unmarshal(configData, &config)
+		if err != nil {
+			return fmt.Errorf("couldn't parse config file: %s", err)
+		}
 	}
 
-	client := github.NewClient(&http.Client{Timeout: 5 * time.Second}).WithAuthToken(token)
+	if config.GitHubToken == "" {
+		return fmt.Errorf("no GitHub token available")
+	}
+
+	client := github.NewClient(&http.Client{Timeout: 5 * time.Second}).WithAuthToken(config.GitHubToken)
 
 	dashboardHandler, err := NewDashboardHandler()
 	if err != nil {
