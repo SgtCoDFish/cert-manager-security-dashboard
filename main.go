@@ -53,6 +53,7 @@ var (
 		TargetRepo("cert-manager", "google-cas-issuer"),
 		TargetRepo("cert-manager", "openshift-routes"),
 		TargetRepo("cert-manager", "issuer-lib", WithHasReleases(false)),
+		TargetRepo("cert-manager", "csi-lib", WithHasReleases(false)),
 	}
 
 	//go:embed templates/index.html
