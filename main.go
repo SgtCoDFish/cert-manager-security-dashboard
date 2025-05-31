@@ -69,6 +69,10 @@ var (
 	bootstrapV341CSSData []byte
 
 	lastNtfy string
+
+	lastRunTmpl = template.Must(template.New("lastRunTmpl").Parse(`<a href="{{ .LastRun.GetHTMLURL }}" title="Latest run of govulncheck for {{ .RepoName }}" target="_blank">{{ .LastRun.GetHeadBranch }}</a>`))
+
+	latestReleaseTmpl = template.Must(template.New("latestReleaseTmpl").Parse(`<a href="{{ .LastRelease.GetHTMLURL }}" title="Latest release for {{ .RepoName }}" target="_blank">{{ .LastRelease.GetTagName }}</a>`))
 )
 
 type targetRepo struct {
@@ -117,6 +121,46 @@ func (tr *targetRepo) LastGovulncheckTime() string {
 	}
 
 	return tr.LastRun.GetCreatedAt().Time.UTC().Format(time.DateTime)
+}
+
+func (tr *targetRepo) GovulncheckHead() template.HTML {
+	if !tr.HasGovulncheck {
+		return "N/A"
+	}
+
+	if tr.LastRun == nil {
+		return "No runs found"
+	}
+
+	buf := &bytes.Buffer{}
+
+	err := lastRunTmpl.Execute(buf, tr)
+	if err != nil {
+		return "Failed to render template"
+	}
+
+	// NB: template.HTML can be dangerous, but this is safe since this is output from "template/html.Template.Execute"
+	return template.HTML(buf.String())
+}
+
+func (tr *targetRepo) LatestReleaseLink() template.HTML {
+	if !tr.HasReleases {
+		return "N/A"
+	}
+
+	if tr.LastRelease == nil {
+		return "No release found"
+	}
+
+	buf := &bytes.Buffer{}
+
+	err := latestReleaseTmpl.Execute(buf, tr)
+	if err != nil {
+		return "Failed to render template"
+	}
+
+	// NB: template.HTML can be dangerous, but this is safe since this is output from "template/html.Template.Execute"
+	return template.HTML(buf.String())
 }
 
 // warnings returns a bootstrap class[1] and a reason if there are any
@@ -504,10 +548,16 @@ func run(ctx context.Context) error {
 
 	<-ctx.Done()
 
-	err = server.Shutdown(context.Background())
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	err = server.Shutdown(shutdownCtx)
 	if err != nil {
 		return err
 	}
+
+	cancel()
+
+	<-shutdownCtx.Done()
 
 	return nil
 }

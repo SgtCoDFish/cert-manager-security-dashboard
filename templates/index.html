@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 	<head>
+		<meta charset="utf-8">
 		<title>Dashboard</title>
 		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<link rel="stylesheet" href="/css/bootstrap-v3.4.1.min.css">
@@ -50,11 +51,11 @@
 								{{ $repo.OrgName }}/{{ $repo.RepoName }}
 								</a>
 							</td>
-							<td>{{ $repo.LastTag }}</td>
+							<td>{{ $repo.LatestReleaseLink }}</td>
 							<td>{{ $repo.LastReleaseTime }}</td>
 							<td>{{ $repo.LastRun.GetConclusion }}</td>
 							<td>{{ $repo.LastGovulncheckTime }}</td>
-							<td>{{ $repo.LastRun.GetHeadBranch }}</td>
+							<td>{{ $repo.GovulncheckHead }} </td>
 							<td>{{ $repo.WarningMessage }}</td>
 						</tr>
 						{{ end }}
