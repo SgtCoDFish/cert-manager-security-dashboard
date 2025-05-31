@@ -552,6 +552,7 @@ func run(ctx context.Context) error {
 
 	err = server.Shutdown(shutdownCtx)
 	if err != nil {
+		cancel()
 		return err
 	}
 
