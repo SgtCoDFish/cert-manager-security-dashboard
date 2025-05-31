@@ -412,6 +412,18 @@ func ntfy(topic string, warnings string) error {
 	return err
 }
 
+func addSecurityHeaders(setHSTS bool, underlying http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';")
+		if setHSTS {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+		}
+
+		underlying.ServeHTTP(w, r)
+	})
+}
+
 func run(ctx context.Context) error {
 	ctx, done := signal.NotifyContext(ctx, os.Interrupt, os.Kill)
 	defer done()
@@ -424,9 +436,12 @@ func run(ctx context.Context) error {
 
 	configData, err := os.ReadFile("/etc/cert-manager-dashboard/config.json")
 	if err != nil {
-		token := os.Getenv("GITHUB_TOKEN")
+		token := os.Getenv("CERT_MANAGER_DASHBOARD_GITHUB_TOKEN")
 		if token == "" {
-			return fmt.Errorf("no config.json available and no GITHUB_TOKEN found in env")
+			token := os.Getenv("GITHUB_TOKEN")
+			if token == "" {
+				return fmt.Errorf("no config.json available and no CERT_MANAGER_DASHBOARD_GITHUB_TOKEN/GITHUB_TOKEN found in env")
+			}
 		}
 
 		config.GitHubToken = token
@@ -468,17 +483,19 @@ func run(ctx context.Context) error {
 	mux.HandleFunc("GET /robots.txt", staticResourceHandler)
 	mux.HandleFunc("GET /css/bootstrap-v3.4.1.min.css", staticResourceHandler)
 
-	addr := ":49984"
+	addr := "[::1]:49984"
+	setHSTS := true
+
 	server := &http.Server{
 		Addr:        addr,
 		BaseContext: func(_ net.Listener) context.Context { return ctx },
 		ErrorLog:    slog.NewLogLogger(logger.With("source", "httpServer").Handler(), slog.LevelError),
-		Handler:     mux,
+		Handler:     addSecurityHeaders(setHSTS, mux),
 	}
 
 	go func() {
 		err := server.ListenAndServe()
-		if err != http.ErrServerClosed {
+		if err != nil && err != http.ErrServerClosed {
 			logger.Error("failed to listen with server", "err", err)
 		}
 	}()
