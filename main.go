@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -40,10 +42,30 @@ func WithHasReleases(hasReleases bool) repoConfigurer {
 	}
 }
 
+func WithVersionFilter(versionFilter string) repoConfigurer {
+	return func(t *targetRepo) {
+		t.VersionFilter = versionFilter
+	}
+}
+
+func WithFriendlyName(name string) repoConfigurer {
+	return func(t *targetRepo) {
+		t.FriendlyName = name
+	}
+}
+
+func WithHasGovulncheck(hasGovulncheck bool) repoConfigurer {
+	return func(t *targetRepo) {
+		t.HasGovulncheck = hasGovulncheck
+	}
+}
+
 var (
 	// targetList is the list of repos we want to check
 	targetList = []*targetRepo{
-		TargetRepo("cert-manager", "cert-manager"),
+		TargetRepo("cert-manager", "cert-manager", WithFriendlyName("master"), WithHasReleases(false)),
+		TargetRepo("cert-manager", "cert-manager", WithVersionFilter(`v1\.18\.[0-9]+`), WithFriendlyName("release-1.18"), WithHasGovulncheck(false)),
+		TargetRepo("cert-manager", "cert-manager", WithVersionFilter(`v1\.17\.[0-9]+`), WithFriendlyName("release-1.17"), WithHasGovulncheck(false)),
 		TargetRepo("cert-manager", "trust-manager"),
 		TargetRepo("cert-manager", "approver-policy"),
 		TargetRepo("cert-manager", "csi-driver"),
@@ -79,6 +101,8 @@ type targetRepo struct {
 	OrgName  string
 	RepoName string
 
+	FriendlyName string
+
 	HasGovulncheck bool
 	HasReleases    bool
 
@@ -87,6 +111,18 @@ type targetRepo struct {
 	LastRun *github.WorkflowRun
 
 	LastRelease *github.RepositoryRelease
+
+	VersionFilter string
+}
+
+func (tr *targetRepo) String() string {
+	suffix := ""
+
+	if tr.FriendlyName != "" {
+		suffix = fmt.Sprintf(" (%s)", tr.FriendlyName)
+	}
+
+	return fmt.Sprintf("%s/%s%s", tr.OrgName, tr.RepoName, suffix)
 }
 
 func (tr *targetRepo) BootstrapClass() string {
@@ -112,7 +148,7 @@ func (tr *targetRepo) LastReleaseTime() string {
 		return "N/A"
 	}
 
-	return tr.LastRelease.GetCreatedAt().Time.UTC().Format(time.DateTime)
+	return tr.LastRelease.GetCreatedAt().Time.UTC().Format(time.DateOnly)
 }
 
 func (tr *targetRepo) LastGovulncheckTime() string {
@@ -250,6 +286,20 @@ func (dh *DashboardHandler) Update(ctx context.Context) error {
 		Repos:       targetList,
 	}
 
+	slices.SortFunc(data.Repos, func(a, b *targetRepo) int {
+		if !a.HasReleases && !b.HasReleases {
+			return 0
+		}
+
+		if a.HasReleases && !b.HasReleases {
+			return -1
+		} else if !a.HasReleases && b.HasReleases {
+			return 1
+		}
+
+		return a.LastRelease.GetCreatedAt().Time.Compare(b.LastRelease.GetCreatedAt().Time)
+	})
+
 	err := dh.indexTemplate.Execute(buf, data)
 	if err != nil {
 		return err
@@ -365,7 +415,42 @@ func getLatestRelease(ctx context.Context, client *github.Client, repo *targetRe
 		return err
 	}
 
+	if len(releases) == 0 {
+		return fmt.Errorf("no releases found for %s/%s", repo.OrgName, repo.RepoName)
+	}
+
+	// set the first release in the GitHub response as the last release;
+	// we might change this if there's a version filter set but at least this will return something sensible
+	// if the version filter doesn't match anything
 	repo.LastRelease = releases[0]
+
+	if repo.VersionFilter == "" {
+		// just use the first release and return
+		return nil
+	}
+
+	foundMatch := false
+	logger := logging.FromContext(ctx).With("repo", fmt.Sprintf("%s/%s", repo.OrgName, repo.RepoName), "versionFilter", repo.VersionFilter)
+
+	for _, rel := range releases {
+		tag := rel.GetTagName()
+
+		match, err := regexp.MatchString(repo.VersionFilter, tag)
+		if err != nil {
+			logger.Error("failed to match version filter", "err", err, "tag", tag)
+			continue
+		}
+
+		if match {
+			repo.LastRelease = rel
+			foundMatch = true
+			break
+		}
+	}
+
+	if !foundMatch {
+		logger.Info("didn't find a matching release for version filter, will use latest")
+	}
 
 	return nil
 }
